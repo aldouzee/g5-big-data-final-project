@@ -5,6 +5,7 @@ pandas>=2.0.0      # Data manipulation and analysis library
 numpy>=1.24.0      # Numerical computing and array operations
 plotly>=5.15.0     # Interactive plotting library for charts and graphs
 kafka-python>=2.0.2  # Apache Kafka Python client for both producer and consumer
+requests>=2.32.0    # Weather API client
 python-dateutil>=2.8.2  # Extended date/time utilities (used by pandas)
 
 # Optional: Storage Systems (uncomment based on your chosen storage)
