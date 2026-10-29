@@ -156,7 +156,11 @@ def consume_kafka_data(config):
     city = config.get("weather_city", "Manila")
     api_key = config.get("weather_api_key") or os.getenv("WEATHER_API_KEY")
 
-    cache_key = f"kafka_consumer_{kafka_broker}_{kafka_topic}"
+    cache_key = f"kafka_consumer_v2_{kafka_broker}_{kafka_topic}"
+    history_key = f"kafka_history_v2_{kafka_broker}_{kafka_topic}"
+    if history_key not in st.session_state:
+        st.session_state[history_key] = pd.DataFrame()
+
     if cache_key not in st.session_state:
         max_retries = 2
         retry_delay = 2
@@ -166,8 +170,9 @@ def consume_kafka_data(config):
                 st.session_state[cache_key] = KafkaConsumer(
                     kafka_topic,
                     bootstrap_servers=[kafka_broker],
-                    auto_offset_reset='latest',
-                    enable_auto_commit=True,
+                    group_id=f"streaming-dashboard-{kafka_topic}",
+                    auto_offset_reset='earliest',
+                    enable_auto_commit=False,
                     value_deserializer=lambda x: json.loads(x.decode('utf-8')),
                     consumer_timeout_ms=5000,
                 )
@@ -203,9 +208,25 @@ def consume_kafka_data(config):
                                 'unit': data.get('unit', ''),
                             })
             if messages:
-                return pd.DataFrame(messages)
+                new_data = pd.DataFrame(messages)
+                history = pd.concat(
+                    [st.session_state[history_key], new_data],
+                    ignore_index=True,
+                )
+                history = history.drop_duplicates(
+                    subset=['timestamp', 'value', 'metric_type', 'sensor_id'],
+                    keep='last',
+                ).sort_values('timestamp').reset_index(drop=True)
+                st.session_state[history_key] = history
+                consumer.commit()
+
+            if not st.session_state[history_key].empty:
+                return st.session_state[history_key].copy()
         except (NoBrokersAvailable, KafkaError, Exception) as exc:
             st.warning(f"Kafka polling failed: {exc}. Falling back to live API data.")
+
+    if not st.session_state[history_key].empty:
+        return st.session_state[history_key].copy()
 
     live_data = fetch_weather_snapshot(city, api_key)
     if live_data is not None and not live_data.empty:

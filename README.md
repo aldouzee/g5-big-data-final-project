@@ -44,7 +44,7 @@ Implement data writing and querying for **ONE** of the following: **HDFS** or **
 ## 🏃‍♂️ Setup & Execution
 
 ### Prerequisites
-Python 3.8+, Apache Kafka, HDFS **OR** MongoDB.
+Python 3.8+, Docker Desktop with Docker Compose, and a WeatherAPI key.
 
 ### Setup
 1. **Setup environment**
@@ -59,19 +59,59 @@ Python 3.8+, Apache Kafka, HDFS **OR** MongoDB.
     conda activate bigdata
     pip install -r requirements.txt
     ```
-3.  **Configure:** Set up Kafka and your chosen Storage System.
-4.  **Optional Environment File (`.env`):** Use for connection details.
+3. **Configure the WeatherAPI key:**
+    - Get an API key from [WeatherAPI](https://www.weatherapi.com/).
+    - Either set it in PowerShell:
+    ```powershell
+    $env:WEATHER_API_KEY = "your-weatherapi-key"
+    ```
+    - Or pass it directly to the producer with `--api-key`.
 
 ### Execution
-1.  **Start Kafka Broker** (and Controller).
-2.  **Start Producer:**
+Run each command from the project directory:
+
+1. **Start Kafka with Docker:**
+    ```powershell
+    docker compose up -d
+    ```
+    The included [docker-compose.yml](docker-compose.yml) starts a single Kafka broker in KRaft mode and exposes it at `localhost:9092`.
+
+2. **Verify Kafka is running:**
+    ```powershell
+    docker compose ps
+    Test-NetConnection localhost -Port 9092
+    ```
+    `TcpTestSucceeded` must be `True` before starting the producer. You can also verify the topic with:
+    ```powershell
+    docker exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
+    ```
+
+3. **Start the producer in a new PowerShell window:**
     ```bash
     python producer.py
     ```
-3.  **Launch Dashboard:**
-    ```bash
+
+    The producer uses `localhost:9092` and the `streaming-data` topic by default. To provide the API key directly:
+    ```powershell
+    python producer.py --api-key "your-weatherapi-key"
+    ```
+
+4. **Launch the dashboard in another PowerShell window:**
+    ```powershell
     streamlit run app.py
     ```
+
+5. **Stop Kafka when finished:**
+    ```powershell
+    docker compose down
+    ```
+
+    To remove Kafka's stored Docker volume and reset its data, use `docker compose down -v`.
+
+### Troubleshooting
+
+* If the producer reports `No Kafka brokers available at localhost:9092`, run `docker compose up -d` and verify the port with `Test-NetConnection localhost -Port 9092`.
+* If the producer reports repeated `KafkaConnectionError: socket disconnected` errors, ensure the producer does not force an old Kafka API version. The current producer lets `kafka-python` negotiate the broker version automatically.
 
 ---
 

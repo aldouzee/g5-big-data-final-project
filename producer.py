@@ -40,7 +40,6 @@ class StreamingDataProducer:
             'acks': 'all',
             'retries': 3,
             'linger_ms': 10,
-            'api_version': (0, 10, 2),
         }
 
         self._connect_to_broker()
