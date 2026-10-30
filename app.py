@@ -31,6 +31,9 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+WEATHER_CITY = "Manila"
+
+
 def setup_sidebar():
     """Configure sidebar options for Kafka and WeatherAPI inputs."""
     st.sidebar.title("Dashboard Controls")
@@ -46,12 +49,6 @@ def setup_sidebar():
         "Kafka Topic",
         value="streaming-data",
         help="Topic used by the live weather producer"
-    )
-
-    weather_city = st.sidebar.text_input(
-        "Weather City",
-        value="Manila",
-        help="City name to query from WeatherAPI"
     )
 
     weather_api_key = st.sidebar.text_input(
@@ -71,7 +68,7 @@ def setup_sidebar():
     return {
         "kafka_broker": kafka_broker,
         "kafka_topic": kafka_topic,
-        "weather_city": weather_city,
+        "weather_city": WEATHER_CITY,
         "weather_api_key": weather_api_key,
         "storage_type": storage_type,
     }
@@ -85,7 +82,7 @@ def fetch_weather_snapshot(city: str, api_key: str):
     try:
         response = requests.get(
             "https://api.weatherapi.com/v1/current.json",
-            params={"key": api_key, "q": city, "aqi": "no"},
+            params={"key": api_key, "q": f"{city}, Philippines", "aqi": "no"},
             timeout=15,
         )
         response.raise_for_status()
@@ -132,7 +129,7 @@ def fetch_weather_snapshot(city: str, api_key: str):
         return None
 
 
-def generate_sample_data():
+def generate_sample_data(city="Manila"):
     """Create realistic weather sample data for dashboard fallbacks."""
     current_time = datetime.now()
     times = [current_time - timedelta(minutes=i) for i in range(100, 0, -1)]
@@ -142,8 +139,8 @@ def generate_sample_data():
         'timestamp': times,
         'value': values,
         'metric_type': ['temperature'] * 100,
-        'sensor_id': ['weatherapi-manila-temperature'] * 100,
-        'location': ['Manila'] * 100,
+        'sensor_id': [f"weatherapi-{city.lower().replace(' ', '-')}-temperature"] * 100,
+        'location': [city] * 100,
         'unit': ['°C'] * 100,
     })
 
@@ -156,12 +153,28 @@ def consume_kafka_data(config):
     city = config.get("weather_city", "Manila")
     api_key = config.get("weather_api_key") or os.getenv("WEATHER_API_KEY")
 
-    cache_key = f"kafka_consumer_v2_{kafka_broker}_{kafka_topic}"
-    history_key = f"kafka_history_v2_{kafka_broker}_{kafka_topic}"
-    if history_key not in st.session_state:
-        st.session_state[history_key] = pd.DataFrame()
+    # The consumer belongs to the broker/topic, not to the selected display
+    # city. Creating another consumer for every city leaves the previous
+    # consumer in the same Kafka group and triggers unnecessary rebalances.
+    cache_key = f"kafka_consumer_v3_{kafka_broker}_{kafka_topic}"
+    stream_history_key = f"kafka_history_v3_{kafka_broker}_{kafka_topic}"
+    if stream_history_key not in st.session_state:
+        st.session_state[stream_history_key] = pd.DataFrame()
 
     if cache_key not in st.session_state:
+        # Close consumers created by older app versions or for a different
+        # broker/topic before creating the single active consumer.
+        stale_keys = [
+            key for key in st.session_state
+            if key.startswith("kafka_consumer_v2_") or (
+                key.startswith("kafka_consumer_v3_") and key != cache_key
+            )
+        ]
+        for stale_key in stale_keys:
+            stale_consumer = st.session_state.pop(stale_key)
+            if stale_consumer is not None:
+                stale_consumer.close()
+
         max_retries = 2
         retry_delay = 2
 
@@ -204,38 +217,42 @@ def consume_kafka_data(config):
                                 'value': float(data['value']),
                                 'metric_type': data['metric_type'],
                                 'sensor_id': data['sensor_id'],
-                                'location': data.get('location', city),
+                                'location': data.get('location', ''),
                                 'unit': data.get('unit', ''),
                             })
             if messages:
                 new_data = pd.DataFrame(messages)
                 history = pd.concat(
-                    [st.session_state[history_key], new_data],
+                    [st.session_state[stream_history_key], new_data],
                     ignore_index=True,
                 )
                 history = history.drop_duplicates(
                     subset=['timestamp', 'value', 'metric_type', 'sensor_id'],
                     keep='last',
                 ).sort_values('timestamp').reset_index(drop=True)
-                st.session_state[history_key] = history
+                st.session_state[stream_history_key] = history
                 consumer.commit()
 
-            if not st.session_state[history_key].empty:
-                return st.session_state[history_key].copy()
         except (NoBrokersAvailable, KafkaError, Exception) as exc:
             st.warning(f"Kafka polling failed: {exc}. Falling back to live API data.")
 
-    if not st.session_state[history_key].empty:
-        return st.session_state[history_key].copy()
+    stream_history = st.session_state[stream_history_key]
+    if not stream_history.empty:
+        selected_city = city.casefold().strip()
+        city_history = stream_history[
+            stream_history["location"].fillna("").str.casefold().str.strip() == selected_city
+        ].copy()
+        if not city_history.empty:
+            return city_history
 
     live_data = fetch_weather_snapshot(city, api_key)
     if live_data is not None and not live_data.empty:
         return live_data
 
     st.info("No live Kafka messages or WeatherAPI data available. Showing generated fallback weather data.")
-    return generate_sample_data()
+    return generate_sample_data(city)
 
-def query_historical_data(time_range="1h", metrics=None):
+def query_historical_data(time_range="1h", metrics=None, city="Manila"):
     """Return a small historical weather dataset using time-range filters."""
     now = datetime.now()
     hours_map = {"1h": 1, "24h": 24, "7d": 168, "30d": 720}
@@ -249,8 +266,8 @@ def query_historical_data(time_range="1h", metrics=None):
             'timestamp': ts,
             'value': round(base, 2),
             'metric_type': 'temperature',
-            'sensor_id': 'historical-weather-manila',
-            'location': 'Manila',
+            'sensor_id': f"historical-weather-{city.lower().replace(' ', '-')}",
+            'location': city,
             'unit': '°C',
         })
 
@@ -260,9 +277,20 @@ def query_historical_data(time_range="1h", metrics=None):
     return data
 
 
+def render_chart_download(fig, filename, label):
+    """Provide an interactive HTML download for a Plotly chart."""
+    chart_html = fig.to_html(full_html=True, include_plotlyjs=True)
+    st.download_button(
+        label=label,
+        data=chart_html,
+        file_name=filename,
+        mime="text/html",
+    )
+
+
 def display_real_time_view(config, refresh_interval):
     """Display the live weather stream and metrics."""
-    st.header("📈 Real-time Weather Dashboard")
+    st.header("Real-time Weather Dashboard")
 
     refresh_state = st.session_state.refresh_state
     st.info(f"**Auto-refresh:** {'🟢 Enabled' if refresh_state['auto_refresh'] else '🔴 Disabled'} - Updates every {refresh_interval} seconds")
@@ -273,19 +301,21 @@ def display_real_time_view(config, refresh_interval):
     if real_time_data is not None:
         data_freshness = datetime.now() - refresh_state['last_refresh']
         freshness_color = "🟢" if data_freshness.total_seconds() < 10 else "🟡" if data_freshness.total_seconds() < 30 else "🔴"
-        st.success(f"{freshness_color} Data updated {data_freshness.total_seconds():.0f} seconds ago")
 
-        st.subheader("📊 Live Weather Metrics")
+        st.subheader("Live Weather Metrics")
         if not real_time_data.empty:
+            latest_record = real_time_data.loc[
+                real_time_data["timestamp"].idxmax()
+            ]
             col1, col2, col3 = st.columns(3)
             with col1:
                 st.metric("Records Received", len(real_time_data))
             with col2:
-                st.metric("Latest Value", f"{real_time_data['value'].iloc[-1]:.2f} {real_time_data['unit'].iloc[-1]}")
+                st.metric("Latest Value", f"{latest_record['value']:.2f} {latest_record['unit']}")
             with col3:
-                st.metric("Location", real_time_data['location'].iloc[0])
+                st.metric("Location", latest_record["location"])
 
-        st.subheader("📈 Live Trend")
+        st.subheader("Live Trend")
         if not real_time_data.empty:
             fig = px.line(
                 real_time_data,
@@ -298,8 +328,13 @@ def display_real_time_view(config, refresh_interval):
             )
             fig.update_layout(xaxis_title='Time', yaxis_title='Value', hovermode='x unified')
             st.plotly_chart(fig, width='stretch')
+            render_chart_download(
+                fig,
+                "current-weather-streaming-chart.html",
+                "Download Current Weather Streaming Chart",
+            )
 
-            with st.expander("📋 View Raw Data"):
+            with st.expander("View Raw Data"):
                 st.dataframe(real_time_data.sort_values('timestamp', ascending=False), width='stretch', height=300)
         else:
             st.warning("No real-time weather data available.")
@@ -309,7 +344,7 @@ def display_real_time_view(config, refresh_interval):
 
 def display_historical_view(config):
     """Display a simple historical weather analysis with filters."""
-    st.header("📊 Historical Weather Analysis")
+    st.header("Historical Weather Analysis")
 
     st.subheader("Data Filters")
     col1, col2, col3 = st.columns(3)
@@ -323,7 +358,11 @@ def display_historical_view(config):
     with col3:
         aggregation = st.selectbox("Aggregation", ["raw", "hourly", "daily", "weekly"], help="Choose the aggregation level")
 
-    historical_data = query_historical_data(time_range, [metric_type] if metric_type != "all" else None)
+    historical_data = query_historical_data(
+        time_range,
+        [metric_type] if metric_type != "all" else None,
+        WEATHER_CITY,
+    )
 
     if historical_data is not None:
         st.subheader("Historical Data Table")
@@ -339,6 +378,11 @@ def display_historical_view(config):
                 labels={'value': 'Value', 'timestamp': 'Time'},
             )
             st.plotly_chart(fig, width='stretch')
+            render_chart_download(
+                fig,
+                f"historical-weather-trends-{time_range}.html",
+                "Download Historical Trends Chart",
+            )
 
             st.subheader("Data Summary")
             col1, col2 = st.columns(2)
@@ -354,9 +398,9 @@ def display_historical_view(config):
 
 def main():
     """Main Streamlit application entry point."""
-    st.title("🚀 Weather Streaming Dashboard")
+    st.title("Weather Streaming Dashboard")
 
-    with st.expander("📋 Project Overview"):
+    with st.expander("Project Overview"):
         st.markdown("""
         This application streams live weather data from WeatherAPI, forwards the data through Kafka,
         and presents real-time and historical dashboard views.
@@ -395,7 +439,7 @@ def main():
         st_autorefresh(interval=refresh_interval * 1000, key="auto_refresh")
     
     # Manual refresh button
-    if st.sidebar.button("🔄 Manual Refresh"):
+    if st.sidebar.button("Manual Refresh"):
         st.session_state.refresh_state['last_refresh'] = datetime.now()
         st.rerun()
     
@@ -404,7 +448,7 @@ def main():
     st.sidebar.metric("Last Refresh", st.session_state.refresh_state['last_refresh'].strftime("%H:%M:%S"))
     
     # Create tabs for different views
-    tab1, tab2 = st.tabs(["📈 Real-time Streaming", "📊 Historical Data"])
+    tab1, tab2 = st.tabs(["Real-time Streaming", "Historical Data"])
     
     with tab1:
         display_real_time_view(config, refresh_interval)

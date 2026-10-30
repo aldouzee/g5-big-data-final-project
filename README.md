@@ -35,6 +35,7 @@ Implement the Streamlit logic:
 * `consume_kafka_data()`: Real-time processing.
 * `query_historical_data()`: Data retrieval from storage.
 * Create interactive widgets (filters, time-range selector) for the Historical View.
+* The dashboard currently displays the Manila weather sensor.
 
 ### 3. Storage Integration
 Implement data writing and querying for **ONE** of the following: **HDFS** or **MongoDB**.
@@ -112,6 +113,7 @@ Run each command from the project directory:
 
 * If the producer reports `No Kafka brokers available at localhost:9092`, run `docker compose up -d` and verify the port with `Test-NetConnection localhost -Port 9092`.
 * If the producer reports repeated `KafkaConnectionError: socket disconnected` errors, ensure the producer does not force an old Kafka API version. The current producer lets `kafka-python` negotiate the broker version automatically.
+* The dashboard currently uses the Manila sensor. To change the city being streamed by Kafka, restart the producer with `--city "City Name"` and update the dashboard configuration if another sensor is added.
 
 ---
 
